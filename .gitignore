@@ -1,0 +1,44 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 仮想環境
+.env
+.venv
+env/
+venv/
+ENV/
+
+# pytest関連
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEやエディタ関連
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# シミュレーション出力
+output/
+figures/
+results/
