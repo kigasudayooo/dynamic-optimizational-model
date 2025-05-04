@@ -1,0 +1,1028 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# # ベルマン方程式による動学最適化: ステップバイステップ解説
+# 
+# このノートブックでは、経済学における動学最適化問題をベルマン方程式を用いて解く方法を段階的に解説します。シンプルな経済成長モデルを例に、値関数反復法と政策反復法の実装と可視化を行います。
+# 
+# ## 目次
+# 
+# 1. [ベルマン方程式の理論的背景](#section1)
+# 2. [シンプルな経済成長モデルの定式化](#section2)
+# 3. [動学プログラミングの基本クラスの実装](#section3)
+# 4. [確率的成長モデルの実装](#section4)
+# 5. [値関数反復法によるモデルの解法](#section5)
+# 6. [政策反復法によるモデルの解法](#section6)
+# 7. [パラメータ変化の影響分析](#section7)
+# 8. [数値計算の効率化とパフォーマンス最適化](#section8)
+# 
+# ## 必要なライブラリのインポート
+
+# In[1]:
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+import time
+from typing import Callable, Tuple, Optional
+from scipy.stats import norm
+import seaborn as sns
+
+# グラフのスタイル設定
+plt.style.use('seaborn-v0_8-whitegrid')
+sns.set_palette("viridis")
+plt.rcParams['figure.figsize'] = (12, 8)
+plt.rcParams['font.size'] = 12
+
+
+# <a id='section1'></a>
+# ## 1. ベルマン方程式の理論的背景
+# 
+# ベルマン方程式は、動学最適化問題を解くための重要な数学的ツールです。この方程式は以下のような形式で表されます：
+# 
+# $$V(s) = \max_{a \in A(s)} \left\{ r(s, a) + \beta \sum_{s' \in S} P(s'|s, a) V(s') \right\}$$
+# 
+# ここで：
+# - $V(s)$ は状態 $s$ における値関数（最適な期待割引報酬）
+# - $A(s)$ は状態 $s$ で取り得る行動の集合
+# - $r(s, a)$ は状態 $s$ で行動 $a$ を取ったときの即時報酬
+# - $\beta$ は割引因子（将来の報酬の現在価値への変換係数）
+# - $P(s'|s, a)$ は状態 $s$ で行動 $a$ を取ったときに状態 $s'$ に遷移する確率
+# 
+# ベルマン方程式の基本的なアイデアは、現在の決定問題を「現在の即時報酬」と「将来の最適な決定による期待割引報酬」に分解することです。これにより、複雑な多期間最適化問題を、より単純な部分問題に分解して解くことができます。
+
+# <a id='section2'></a>
+# ## 2. シンプルな経済成長モデルの定式化
+# 
+# 経済成長モデルを例にベルマン方程式を適用してみましょう。簡単なシンプルな成長モデルを考えます：
+# 
+# - 状態変数: 資本ストック $k$
+# - 行動変数: 次期の資本ストック $k'$
+# - 生産関数: $f(k) = z k^\alpha$（コブ・ダグラス型）
+# - 効用関数: $u(c) = \log(c)$（対数型）
+# - 制約条件: $c + k' = f(k) + (1-\delta)k$（資源制約）
+# 
+# ここで、$\alpha$ は資本分配率、$\delta$ は資本減耗率、$z$ は生産性パラメータです。
+# 
+# このモデルのベルマン方程式は次のようになります：
+# 
+# $$V(k) = \max_{k'} \left\{ \log(z k^\alpha + (1-\delta)k - k') + \beta V(k') \right\}$$
+# 
+# この方程式を解くために、値関数反復法（Value Iteration）と政策反復法（Policy Iteration）という2つの方法を実装します。
+
+# <a id='section3'></a>
+# ## 3. 動学プログラミングの基本クラスの実装
+# 
+# まず、ベルマン方程式を解くための基本クラスを実装します。このクラスは、値関数反復法と政策反復法の両方をサポートします。
+
+# In[2]:
+
+
+class DynamicProgram:
+    """ベルマン方程式を解くための基本クラス"""
+    
+    def __init__(
+        self,
+        state_grid: np.ndarray,
+        action_grid: np.ndarray,
+        reward_func: Callable,
+        transition_func: Callable,
+        discount_factor: float = 0.95,
+        tolerance: float = 1e-6,
+        max_iter: int = 1000,
+    ):
+        """
+        Parameters
+        ----------
+        state_grid : np.ndarray
+            状態空間のグリッド
+        action_grid : np.ndarray
+            行動空間のグリッド
+        reward_func : Callable
+            報酬関数 R(s, a)
+        transition_func : Callable
+            遷移関数 P(s'|s, a)
+        discount_factor : float, default=0.95
+            割引因子
+        tolerance : float, default=1e-6
+            値関数反復の収束許容誤差
+        max_iter : int, default=1000
+            値関数反復の最大反復回数
+        """
+        self.state_grid = state_grid
+        self.action_grid = action_grid
+        self.reward_func = reward_func
+        self.transition_func = transition_func
+        self.discount_factor = discount_factor
+        self.tolerance = tolerance
+        self.max_iter = max_iter
+        
+        # 初期化
+        self.value_function = np.zeros_like(state_grid)
+        self.policy = np.zeros_like(state_grid, dtype=int)
+        
+        # 収束までの反復回数を記録
+        self.iterations_history = []
+        
+    def bellman_operator(self, v: np.ndarray) -> np.ndarray:
+        """ベルマンオペレータ T[v](s) = max_a { R(s,a) + γ Σ_s' P(s'|s,a) v(s') }"""
+        n_states = len(self.state_grid)
+        Tv = np.zeros(n_states)
+        
+        for i, s in enumerate(self.state_grid):
+            values = []
+            for a_idx, a in enumerate(self.action_grid):
+                # 即時報酬
+                r = self.reward_func(s, a)
+                
+                # 将来価値の期待値
+                expected_future_value = 0
+                for j, s_next in enumerate(self.state_grid):
+                    prob = self.transition_func(s_next, s, a)
+                    expected_future_value += prob * v[j]
+                
+                # 割引現在価値
+                values.append(r + self.discount_factor * expected_future_value)
+            
+            # 最大化
+            Tv[i] = max(values)
+            # 最適政策の更新
+            self.policy[i] = np.argmax(values)
+            
+        return Tv
+    
+    def value_iteration(self, verbose=True) -> Tuple[np.ndarray, np.ndarray]:
+        """値関数反復法でベルマン方程式を解く"""
+        v = np.zeros_like(self.state_grid)
+        
+        # 反復回数とエラー履歴を保存するリスト
+        iterations = []
+        errors = []
+        
+        for i in range(self.max_iter):
+            v_new = self.bellman_operator(v)
+            
+            # 収束判定
+            error = np.max(np.abs(v_new - v))
+            iterations.append(i + 1)
+            errors.append(error)
+            
+            if error < self.tolerance:
+                if verbose:
+                    print(f"Value iteration converged in {i+1} iterations.")
+                break
+                
+            v = v_new
+            
+        if i == self.max_iter - 1 and verbose:
+            print(f"Warning: Value iteration did not converge within {self.max_iter} iterations.")
+            
+        self.value_function = v
+        self.iterations_history = [(iterations, errors)]
+        return self.value_function, self.policy
+    
+    def policy_iteration(self, verbose=True) -> Tuple[np.ndarray, np.ndarray]:
+        """政策反復法でベルマン方程式を解く"""
+        v = np.zeros_like(self.state_grid)
+        policy = np.zeros_like(self.state_grid, dtype=int)
+        
+        # 反復回数とエラー履歴を保存するリスト
+        iterations = []
+        policy_changes = []
+        
+        for i in range(self.max_iter):
+            # 政策評価（政策が与えられた下での値関数の計算）
+            v = self._policy_evaluation(policy)
+            
+            # 政策改善
+            new_policy = self._policy_improvement(v)
+            
+            # 政策の変化を計測
+            policy_change = np.sum(new_policy != policy)
+            iterations.append(i + 1)
+            policy_changes.append(policy_change)
+            
+            # 政策が収束したかチェック
+            if np.array_equal(new_policy, policy):
+                if verbose:
+                    print(f"Policy iteration converged in {i+1} iterations.")
+                break
+                
+            policy = new_policy
+            
+        if i == self.max_iter - 1 and verbose:
+            print(f"Warning: Policy iteration did not converge within {self.max_iter} iterations.")
+            
+        self.value_function = v
+        self.policy = policy
+        self.iterations_history = [(iterations, policy_changes)]
+        return self.value_function, self.policy
+    
+    def _policy_evaluation(self, policy: np.ndarray) -> np.ndarray:
+        """与えられた政策の下での値関数を計算"""
+        v = np.zeros_like(self.state_grid)
+        
+        for _ in range(self.max_iter):
+            v_new = np.zeros_like(v)
+            
+            for i, s in enumerate(self.state_grid):
+                a = self.action_grid[policy[i]]
+                
+                # 即時報酬
+                r = self.reward_func(s, a)
+                
+                # 将来価値の期待値
+                expected_future_value = 0
+                for j, s_next in enumerate(self.state_grid):
+                    prob = self.transition_func(s_next, s, a)
+                    expected_future_value += prob * v[j]
+                
+                # 割引現在価値
+                v_new[i] = r + self.discount_factor * expected_future_value
+            
+            # 収束判定
+            error = np.max(np.abs(v_new - v))
+            if error < self.tolerance:
+                break
+                
+            v = v_new
+            
+        return v
+    
+    def _policy_improvement(self, v: np.ndarray) -> np.ndarray:
+        """値関数に基づく政策改善"""
+        new_policy = np.zeros_like(self.state_grid, dtype=int)
+        
+        for i, s in enumerate(self.state_grid):
+            values = []
+            for a_idx, a in enumerate(self.action_grid):
+                # 即時報酬
+                r = self.reward_func(s, a)
+                
+                # 将来価値の期待値
+                expected_future_value = 0
+                for j, s_next in enumerate(self.state_grid):
+                    prob = self.transition_func(s_next, s, a)
+                    expected_future_value += prob * v[j]
+                
+                # 割引現在価値
+                values.append(r + self.discount_factor * expected_future_value)
+            
+            # 最大化行動を選択
+            new_policy[i] = np.argmax(values)
+            
+        return new_policy
+    
+    def plot_convergence(self, method='value_iteration'):
+        """収束の様子をプロット"""
+        if not self.iterations_history:
+            print("収束履歴がありません。まずモデルを解いてください。")
+            return
+        
+        iterations, metrics = self.iterations_history[0]
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        if method == 'value_iteration':
+            metric_name = '値関数の変化量'
+            title = '値関数反復法の収束'
+        else:
+            metric_name = '政策の変化数'
+            title = '政策反復法の収束'
+            
+        ax.plot(iterations, metrics, 'o-', lw=2, label=metric_name)
+        ax.set_xlabel('反復回数')
+        ax.set_ylabel(metric_name)
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        
+        if method == 'value_iteration':
+            ax.set_yscale('log')
+            ax.axhline(y=self.tolerance, color='r', linestyle='--', 
+                       label=f'収束許容誤差 ({self.tolerance:.0e})')
+        
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+
+
+# <a id='section4'></a>
+# ## 4. 確率的成長モデルの実装
+# 
+# 次に、上記の基本クラスを継承して、確率的成長モデルを実装します。
+
+# In[3]:
+
+
+class StochasticGrowthModel(DynamicProgram):
+    """確率的成長モデル"""
+    
+    def __init__(
+        self,
+        alpha: float = 0.3,
+        beta: float = 0.95,
+        delta: float = 0.1,
+        sigma: float = 0.02,
+        z: float = 1.0,
+        k_min: float = 0.1,
+        k_max: float = 10.0,
+        n_states: int = 50,
+        n_shocks: int = 1,  # 1はショックなし（決定論的モデル）
+        tolerance: float = 1e-6,
+    ):
+        """
+        Parameters
+        ----------
+        alpha : float, default=0.3
+            資本分配率
+        beta : float, default=0.95
+            割引因子
+        delta : float, default=0.1
+            資本減耗率
+        sigma : float, default=0.02
+            生産性ショックの標準偏差（使用しない場合は0）
+        z : float, default=1.0
+            基準生産性レベル
+        k_min : float, default=0.1
+            資本グリッドの最小値
+        k_max : float, default=10.0
+            資本グリッドの最大値
+        n_states : int, default=50
+            資本グリッドの数
+        n_shocks : int, default=1
+            生産性ショックの数（1の場合はショックなし）
+        tolerance : float, default=1e-6
+            収束許容誤差
+        """
+        self.alpha = alpha
+        self.beta = beta
+        self.delta = delta
+        self.sigma = sigma
+        self.z = z
+        
+        # 状態空間（資本ストック）
+        self.capital_grid = np.linspace(k_min, k_max, n_states)
+        
+        # 行動空間（次期資本ストック）- 今回は状態空間と同じとする
+        self.next_capital_grid = np.copy(self.capital_grid)
+        
+        # 生産性ショック
+        if n_shocks > 1:
+            self.shocks, self.shock_probs = self._create_shock_grid(n_shocks)
+        else:
+            # ショックなしの場合は決定論的モデル
+            self.shocks = np.array([1.0])
+            self.shock_probs = np.array([1.0])
+        
+        # DynamicProgramの初期化
+        super().__init__(
+            state_grid=self.capital_grid,
+            action_grid=self.next_capital_grid,
+            reward_func=self._reward_function,
+            transition_func=self._transition_function,
+            discount_factor=beta,
+            tolerance=tolerance,
+        )
+        
+        # 定常状態の理論値を計算（将来比較用）
+        self.theoretical_steady_state = self._calculate_theoretical_ss()
+    
+    def _create_shock_grid(self, n_shocks: int) -> tuple:
+        """生産性ショックのグリッドを作成"""
+        # 正規分布の離散近似
+        shock_min = -3 * self.sigma
+        shock_max = 3 * self.sigma
+        shocks = np.linspace(shock_min, shock_max, n_shocks)
+        
+        # 各ショックの確率
+        x = np.linspace(norm.ppf(0.01), norm.ppf(0.99), n_shocks)
+        shock_probs = norm.pdf(x)
+        shock_probs = shock_probs / shock_probs.sum()  # 正規化
+        
+        return np.exp(shocks), shock_probs
+    
+    def _production_function(self, k: float, z: float = None) -> float:
+        """コブ・ダグラス生産関数 Y = zK^α"""
+        if z is None:
+            z = self.z
+        return z * k ** self.alpha
+    
+    def _reward_function(self, k: float, k_next: float) -> float:
+        """効用関数 u(c) = log(c)、ここでc = zk^α + (1-δ)k - k_next"""
+        c = self._production_function(k) + (1 - self.delta) * k - k_next
+        if c <= 0:
+            return -np.inf  # 消費が非正の場合は実行不可能（-∞の効用）
+        return np.log(c)
+    
+    def _transition_function(self, k_next: float, k: float, k_prime: float) -> float:
+        """遷移確率
+        
+        k_next: 次期の状態（資本ストック）
+        k: 現在の状態（資本ストック）
+        k_prime: 現在選択する次期資本
+        """
+        # 確率的ショックのない決定論的なモデルでは、
+        # k_prime（選択した次期資本）とk_next（実現する次期資本）が一致する場合のみ確率1
+        return 1.0 if np.isclose(k_next, k_prime) else 0.0
+    
+    def _calculate_theoretical_ss(self) -> float:
+        """理論的な定常状態の資本ストックを計算
+        コブ・ダグラス生産関数の場合、定常状態は以下の式で導出できる：
+        k* = (αβ / (1 - β(1-δ)))^(1/(1-α))
+        """
+        numerator = self.alpha * self.beta
+        denominator = 1 - self.beta * (1 - self.delta)
+        return (numerator / denominator) ** (1 / (1 - self.alpha))
+    
+    def solve(self, method: str = 'value_iteration', verbose=True) -> tuple:
+        """モデルを解く"""
+        start_time = time.time()
+        
+        if method == 'value_iteration':
+            v, p = self.value_iteration(verbose=verbose)
+        elif method == 'policy_iteration':
+            v, p = self.policy_iteration(verbose=verbose)
+        else:
+            raise ValueError("Method must be either 'value_iteration' or 'policy_iteration'")
+        
+        elapsed_time = time.time() - start_time
+        if verbose:
+            print(f"解法時間: {elapsed_time:.3f}秒")
+        
+        # 政策関数（次期資本の値）を計算
+        policy_values = np.array([self.capital_grid[i] for i in p])
+        
+        # 定常状態の資本ストックを見つける（k' = k となる点）
+        diffs = np.abs(policy_values - self.capital_grid)
+        steady_state_idx = np.argmin(diffs)
+        steady_state_k = self.capital_grid[steady_state_idx]
+        
+        if verbose:
+            print(f"数値計算による定常状態の資本: k* = {steady_state_k:.4f}")
+            print(f"理論的な定常状態の資本: k* = {self.theoretical_steady_state:.4f}")
+            print(f"相対誤差: {abs(steady_state_k - self.theoretical_steady_state) / self.theoretical_steady_state:.2%}")
+        
+        return v, p, policy_values, steady_state_k
+    
+    def plot_policy_function(self, policy_values=None, show_steady_state=True):
+        """政策関数をプロット"""
+        if policy_values is None:
+            # policy_valuesが与えられていない場合は、現在の政策から計算
+            policy_values = np.array([self.capital_grid[i] for i in self.policy])
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # 政策関数のプロット
+        ax.plot(self.capital_grid, policy_values, 'b-', lw=2, label='政策関数 k\'(k)')
+        
+        # 45度線のプロット
+        ax.plot(self.capital_grid, self.capital_grid, 'k--', lw=1, alpha=0.7, label='45度線 (k\'=k)')
+        
+        if show_steady_state:
+            # 定常状態の資本ストックを見つける（k' = k となる点）
+            diffs = np.abs(policy_values - self.capital_grid)
+            steady_state_idx = np.argmin(diffs)
+            steady_state_k = self.capital_grid[steady_state_idx]
+            
+            # 定常状態をプロット
+            ax.plot([steady_state_k], [steady_state_k], 'ro', ms=10, 
+                   label=f'定常状態 k*={steady_state_k:.4f}')
+            
+            # 理論的な定常状態も表示
+            ax.axvline(x=self.theoretical_steady_state, color='g', linestyle='--', alpha=0.7,
+                      label=f'理論的な定常状態 k*={self.theoretical_steady_state:.4f}')
+        
+        ax.set_xlabel('現在の資本ストック k')
+        ax.set_ylabel('次期の資本ストック k\'')
+        ax.set_title('最適政策関数')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.show()
+        
+    def plot_value_function(self):
+        """値関数をプロット"""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        ax.plot(self.capital_grid, self.value_function, 'r-', lw=2)
+        ax.set_xlabel('資本ストック k')
+        ax.set_ylabel('値関数 V(k)')
+        ax.set_title('最適値関数')
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+        
+    def plot_consumption_function(self, policy_values=None):
+        """消費関数をプロット"""
+        if policy_values is None:
+            # policy_valuesが与えられていない場合は、現在の政策から計算
+            policy_values = np.array([self.capital_grid[i] for i in self.policy])
+        
+        # 消費関数の計算: c(k) = f(k) + (1-δ)k - k'(k)
+        consumption = self._production_function(self.capital_grid) + (1 - self.delta) * self.capital_grid - policy_values
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        ax.plot(self.capital_grid, consumption, 'g-', lw=2)
+        ax.set_xlabel('資本ストック k')
+        ax.set_ylabel('消費 c(k)')
+        ax.set_title('消費関数')
+        ax.grid(True, alpha=0.3)
+        
+        # 定常状態の消費も表示
+        ss_idx = np.argmin(np.abs(self.capital_grid - self.theoretical_steady_state))
+        ss_consumption = consumption[ss_idx]
+        ax.plot([self.theoretical_steady_state], [ss_consumption], 'ro', ms=10,
+               label=f'定常状態消費 c*={ss_consumption:.4f}')
+        
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+
+
+# <a id='section5'></a>
+# ## 5. 値関数反復法によるモデルの解法
+# 
+# 値関数反復法（Value Iteration）はベルマン方程式を繰り返し適用して値関数の近似を改善していく方法です。以下では、基本的なパラメータ設定でモデルを解いてみます。
+
+# In[4]:
+
+
+# 基本的な成長モデルのパラメータ設定
+model_vi = StochasticGrowthModel(
+    alpha=0.3,     # 資本分配率
+    beta=0.95,     # 割引因子
+    delta=0.1,     # 資本減耗率
+    z=1.0,         # 生産性レベル
+    k_min=0.1,     # 資本グリッドの最小値
+    k_max=10.0,    # 資本グリッドの最大値
+    n_states=100,  # 資本グリッドの数
+    tolerance=1e-6 # 収束許容誤差
+)
+
+# 値関数反復法でモデルを解く
+v_vi, p_vi, policy_values_vi, ss_k_vi = model_vi.solve(method='value_iteration')
+
+# 収束の様子をプロット
+model_vi.plot_convergence(method='value_iteration')
+
+# 政策関数をプロット
+model_vi.plot_policy_function(policy_values_vi)
+
+# 値関数をプロット
+model_vi.plot_value_function()
+
+# 消費関数をプロット
+model_vi.plot_consumption_function(policy_values_vi)
+
+
+# <a id='section6'></a>
+# ## 6. 政策反復法によるモデルの解法
+# 
+# 政策反復法（Policy Iteration）は「政策評価」と「政策改善」のステップを繰り返す方法です。同じモデルを政策反復法で解き、値関数反復法と比較してみましょう。
+
+# In[5]:
+
+
+# 基本的な成長モデル（政策反復法用）
+model_pi = StochasticGrowthModel(
+    alpha=0.3,     # 資本分配率
+    beta=0.95,     # 割引因子
+    delta=0.1,     # 資本減耗率
+    z=1.0,         # 生産性レベル
+    k_min=0.1,     # 資本グリッドの最小値
+    k_max=10.0,    # 資本グリッドの最大値
+    n_states=100,  # 資本グリッドの数
+    tolerance=1e-6 # 収束許容誤差
+)
+
+# 政策反復法でモデルを解く
+v_pi, p_pi, policy_values_pi, ss_k_pi = model_pi.solve(method='policy_iteration')
+
+# 収束の様子をプロット
+model_pi.plot_convergence(method='policy_iteration')
+
+# 政策関数をプロット
+model_pi.plot_policy_function(policy_values_pi)
+
+
+# 値関数反復法と政策反復法の比較
+
+# In[6]:
+
+
+# 値関数の比較
+fig, ax = plt.subplots(figsize=(10, 6))
+
+ax.plot(model_vi.capital_grid, v_vi, 'b-', lw=2, alpha=0.7, label='値関数反復法')
+ax.plot(model_pi.capital_grid, v_pi, 'r--', lw=2, alpha=0.7, label='政策反復法')
+ax.set_xlabel('資本ストック k')
+ax.set_ylabel('値関数 V(k)')
+ax.set_title('値関数の比較')
+ax.grid(True, alpha=0.3)
+ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# 政策関数の比較
+fig, ax = plt.subplots(figsize=(10, 6))
+
+ax.plot(model_vi.capital_grid, policy_values_vi, 'b-', lw=2, alpha=0.7, label='値関数反復法')
+ax.plot(model_pi.capital_grid, policy_values_pi, 'r--', lw=2, alpha=0.7, label='政策反復法')
+ax.plot(model_vi.capital_grid, model_vi.capital_grid, 'k:', lw=1, alpha=0.5, label='45度線')
+ax.set_xlabel('資本ストック k')
+ax.set_ylabel('次期資本ストック k\'')
+ax.set_title('政策関数の比較')
+ax.grid(True, alpha=0.3)
+ax.legend()
+
+plt.tight_layout()
+plt.show()
+
+# 解法時間と収束速度の比較
+print("解法手法の比較:")
+print(f"値関数反復法: {len(model_vi.iterations_history[0][0])}回の反復")
+print(f"政策反復法: {len(model_pi.iterations_history[0][0])}回の反復")
+print(f"定常状態の資本の差: {abs(ss_k_vi - ss_k_pi):.8f}")
+print(f"値関数の最大差: {np.max(np.abs(v_vi - v_pi)):.8f}")
+
+
+# <a id='section7'></a>
+# ## 7. パラメータ変化の影響分析
+# 
+# モデルのパラメータ（資本分配率、割引因子、資本減耗率など）が変化すると、最適政策と定常状態がどのように変わるかを分析してみましょう。
+
+# In[7]:
+
+
+def analyze_parameter_sensitivity(param_name, param_values, base_params=None):
+    """パラメータの感度分析を行い、結果をプロットする"""
+    if base_params is None:
+        base_params = {
+            'alpha': 0.3,
+            'beta': 0.95,
+            'delta': 0.1,
+            'z': 1.0,
+            'k_min': 0.1,
+            'k_max': 10.0,
+            'n_states': 50,
+            'tolerance': 1e-5
+        }
+    
+    # 結果を保存するリスト
+    policies = []
+    steady_states = []
+    theoretical_steady_states = []
+    
+    for value in param_values:
+        # パラメータを更新
+        params = base_params.copy()
+        params[param_name] = value
+        
+        # モデルを作成して解く
+        model = StochasticGrowthModel(**params)
+        _, _, policy_values, ss_k = model.solve(method='value_iteration', verbose=False)
+        
+        # 結果を保存
+        policies.append(policy_values)
+        steady_states.append(ss_k)
+        theoretical_steady_states.append(model.theoretical_steady_state)
+    
+    # 結果の可視化
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # 政策関数の比較
+    for i, value in enumerate(param_values):
+        ax1.plot(model.capital_grid, policies[i], label=f'{param_name}={value}')
+    
+    ax1.plot(model.capital_grid, model.capital_grid, 'k--', alpha=0.5, label='45度線')
+    ax1.set_xlabel('資本ストック k')
+    ax1.set_ylabel('次期資本ストック k\'')
+    ax1.set_title(f'政策関数の比較: {param_name}の影響')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # 定常状態の比較
+    ax2.plot(param_values, steady_states, 'bo-', label='数値解')
+    ax2.plot(param_values, theoretical_steady_states, 'r--', label='理論値')
+    ax2.set_xlabel(param_name)
+    ax2.set_ylabel('定常状態の資本 k*')
+    ax2.set_title(f'定常状態に対する{param_name}の影響')
+    ax2.grid(True, alpha=0.3)
+    ax2.legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return policies, steady_states, theoretical_steady_states
+
+
+# ### 資本分配率(α)の影響分析
+
+# In[8]:
+
+
+# 資本分配率αの影響
+alpha_values = [0.2, 0.3, 0.4, 0.5, 0.6]
+alpha_results = analyze_parameter_sensitivity('alpha', alpha_values)
+
+
+# ### 割引因子(β)の影響分析
+
+# In[9]:
+
+
+# 割引因子βの影響
+beta_values = [0.90, 0.93, 0.95, 0.97, 0.99]
+beta_results = analyze_parameter_sensitivity('beta', beta_values)
+
+
+# ### 資本減耗率(δ)の影響分析
+
+# In[10]:
+
+
+# 資本減耗率δの影響
+delta_values = [0.05, 0.1, 0.15, 0.2, 0.25]
+delta_results = analyze_parameter_sensitivity('delta', delta_values)
+
+
+# ### 生産性(z)の影響分析
+
+# In[11]:
+
+
+# 生産性zの影響
+z_values = [0.8, 0.9, 1.0, 1.1, 1.2]
+z_results = analyze_parameter_sensitivity('z', z_values)
+
+
+# <a id='section8'></a>
+# ## 8. 数値計算の効率化とパフォーマンス最適化
+# 
+# 動学最適化モデルの数値計算は計算量が多く、特に状態空間や行動空間が大きい場合は実行時間が長くなります。ここでは、計算の効率化と最適化のいくつかの方法を試してみましょう。
+
+# In[12]:
+
+
+def compare_grid_sizes_and_tolerances():
+    """グリッドサイズと収束許容誤差が実行時間と精度に与える影響を比較"""
+    
+    # テストするグリッドサイズと収束許容誤差
+    grid_sizes = [20, 50, 100, 200]
+    tolerances = [1e-3, 1e-5, 1e-7]
+    
+    # 結果を保存する辞書
+    results = {}
+    
+    for n_states in grid_sizes:
+        results[n_states] = {}
+        
+        for tol in tolerances:
+            print(f"グリッドサイズ: {n_states}, 収束許容誤差: {tol}")
+            
+            # モデルを作成
+            model = StochasticGrowthModel(
+                n_states=n_states,
+                tolerance=tol
+            )
+            
+            # 値関数反復法での解法時間を計測
+            start_time = time.time()
+            _, _, policy_values, ss_k = model.solve(method='value_iteration', verbose=False)
+            vi_time = time.time() - start_time
+            
+            # 政策反復法での解法時間を計測
+            start_time = time.time()
+            _, _, _, _ = model.solve(method='policy_iteration', verbose=False)
+            pi_time = time.time() - start_time
+            
+            # 理論的な定常状態との誤差
+            error = abs(ss_k - model.theoretical_steady_state) / model.theoretical_steady_state
+            
+            # 結果を保存
+            results[n_states][tol] = {
+                'value_iteration_time': vi_time,
+                'policy_iteration_time': pi_time,
+                'relative_error': error,
+                'vi_iterations': len(model.iterations_history[0][0])
+            }
+    
+    # 結果の可視化
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    # 値関数反復法の実行時間
+    for tol in tolerances:
+        times = [results[n][tol]['value_iteration_time'] for n in grid_sizes]
+        axes[0, 0].plot(grid_sizes, times, 'o-', label=f'tol={tol}')
+    
+    axes[0, 0].set_xlabel('グリッドサイズ')
+    axes[0, 0].set_ylabel('実行時間 (秒)')
+    axes[0, 0].set_title('値関数反復法の実行時間')
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend()
+    
+    # 政策反復法の実行時間
+    for tol in tolerances:
+        times = [results[n][tol]['policy_iteration_time'] for n in grid_sizes]
+        axes[0, 1].plot(grid_sizes, times, 'o-', label=f'tol={tol}')
+    
+    axes[0, 1].set_xlabel('グリッドサイズ')
+    axes[0, 1].set_ylabel('実行時間 (秒)')
+    axes[0, 1].set_title('政策反復法の実行時間')
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend()
+    
+    # 相対誤差
+    for tol in tolerances:
+        errors = [results[n][tol]['relative_error'] for n in grid_sizes]
+        axes[1, 0].plot(grid_sizes, errors, 'o-', label=f'tol={tol}')
+    
+    axes[1, 0].set_xlabel('グリッドサイズ')
+    axes[1, 0].set_ylabel('相対誤差')
+    axes[1, 0].set_title('定常状態の理論値との相対誤差')
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].set_yscale('log')
+    axes[1, 0].legend()
+    
+    # 反復回数
+    for tol in tolerances:
+        iters = [results[n][tol]['vi_iterations'] for n in grid_sizes]
+        axes[1, 1].plot(grid_sizes, iters, 'o-', label=f'tol={tol}')
+    
+    axes[1, 1].set_xlabel('グリッドサイズ')
+    axes[1, 1].set_ylabel('反復回数')
+    axes[1, 1].set_title('値関数反復法の収束までの反復回数')
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].legend()
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return results
+
+
+# In[13]:
+
+
+# グリッドサイズと収束許容誤差の影響を比較
+performance_results = compare_grid_sizes_and_tolerances()
+
+
+# ### ベクトル化による高速化
+
+# In[14]:
+
+
+class OptimizedGrowthModel(StochasticGrowthModel):
+    """ベクトル化操作によって最適化された成長モデル"""
+    
+    def bellman_operator_vectorized(self, v: np.ndarray) -> np.ndarray:
+        """ベクトル化されたベルマンオペレータ"""
+        n_states = len(self.state_grid)
+        n_actions = len(self.action_grid)
+        
+        # 状態と行動の全ての組み合わせについて報酬を計算
+        # shape: (n_states, n_actions)
+        states_grid = self.state_grid[:, np.newaxis]
+        actions_grid = self.action_grid[np.newaxis, :]
+        
+        # 消費を計算: c = f(k) + (1-δ)k - k'
+        consumption = (self.z * states_grid ** self.alpha + 
+                      (1 - self.delta) * states_grid - 
+                      actions_grid)
+        
+        # 実行可能な消費のみ有効（消費が正）
+        feasible = consumption > 0
+        
+        # 報酬を計算: u(c) = log(c)
+        rewards = np.zeros((n_states, n_actions))
+        rewards[feasible] = np.log(consumption[feasible])
+        rewards[~feasible] = -np.inf
+        
+        # 将来価値の期待値（決定論的モデルの場合）
+        # 各行動に対応する次期状態のインデックスを見つける
+        action_indices = np.searchsorted(self.state_grid, self.action_grid)
+        # 範囲外の値を修正（最大インデックスを超えないように）
+        action_indices = np.minimum(action_indices, n_states - 1)
+        
+        # 将来価値の計算
+        future_values = self.discount_factor * v[action_indices]
+        
+        # 合計値（現在の報酬 + 割引将来価値）
+        total_values = rewards + future_values[np.newaxis, :]
+        
+        # 各状態での最大値を取得
+        Tv = np.max(total_values, axis=1)
+        
+        # 最適政策の更新
+        self.policy = np.argmax(total_values, axis=1)
+        
+        return Tv
+    
+    def value_iteration_optimized(self, verbose=True) -> Tuple[np.ndarray, np.ndarray]:
+        """最適化された値関数反復法"""
+        v = np.zeros_like(self.state_grid)
+        
+        # 反復回数とエラー履歴を保存するリスト
+        iterations = []
+        errors = []
+        
+        start_time = time.time()
+        
+        for i in range(self.max_iter):
+            v_new = self.bellman_operator_vectorized(v)
+            
+            # 収束判定
+            error = np.max(np.abs(v_new - v))
+            iterations.append(i + 1)
+            errors.append(error)
+            
+            if error < self.tolerance:
+                if verbose:
+                    elapsed_time = time.time() - start_time
+                    print(f"Optimized value iteration converged in {i+1} iterations in {elapsed_time:.3f} seconds.")
+                break
+                
+            v = v_new
+            
+        if i == self.max_iter - 1 and verbose:
+            print(f"Warning: Optimized value iteration did not converge within {self.max_iter} iterations.")
+            
+        self.value_function = v
+        self.iterations_history = [(iterations, errors)]
+        return self.value_function, self.policy
+    
+    def compare_standard_vs_optimized(self):
+        """標準実装と最適化実装の実行時間を比較"""
+        # 標準実装（元のbellman_operator使用）
+        start_time = time.time()
+        v_standard, p_standard = self.value_iteration(verbose=False)
+        standard_time = time.time() - start_time
+        standard_iterations = len(self.iterations_history[0][0])
+        
+        # 最適化実装（ベクトル化されたbellman_operator使用）
+        start_time = time.time()
+        v_optimized, p_optimized = self.value_iteration_optimized(verbose=False)
+        optimized_time = time.time() - start_time
+        optimized_iterations = len(self.iterations_history[0][0])
+        
+        # 結果の表示
+        print("\n実装の比較:")
+        print(f"標準実装: {standard_time:.3f}秒, {standard_iterations}回の反復")
+        print(f"最適化実装: {optimized_time:.3f}秒, {optimized_iterations}回の反復")
+        print(f"高速化率: {standard_time / optimized_time:.1f}倍")
+        
+        # 結果の一致確認
+        value_diff = np.max(np.abs(v_standard - v_optimized))
+        policy_diff = np.sum(p_standard != p_optimized)
+        
+        print(f"\n結果の差異:")
+        print(f"値関数の最大差: {value_diff:.8f}")
+        print(f"政策の差異数: {policy_diff}/{len(p_standard)}")
+        
+        return {
+            'standard_time': standard_time,
+            'optimized_time': optimized_time,
+            'speedup': standard_time / optimized_time,
+            'value_diff': value_diff,
+            'policy_diff': policy_diff
+        }
+
+
+# In[15]:
+
+
+# 最適化されたモデルを作成してパフォーマンスを比較
+optimized_model = OptimizedGrowthModel(
+    alpha=0.3,
+    beta=0.95,
+    delta=0.1,
+    n_states=200,  # より大きなグリッドサイズでテスト
+    tolerance=1e-6
+)
+
+# 標準実装と最適化実装を比較
+optimization_results = optimized_model.compare_standard_vs_optimized()
+
+# 最適化されたモデルで政策関数をプロット
+_, _, policy_values_opt, _ = optimized_model.solve(method='value_iteration', verbose=True)
+optimized_model.plot_policy_function(policy_values_opt)
+
+
+# ## まとめ
+# 
+# このノートブックでは、ベルマン方程式による動学最適化の基本概念と実装方法を段階的に解説しました。主なポイントは以下の通りです：
+# 
+# 1. **ベルマン方程式**は動学最適化問題を再帰的に表現し、複雑な問題を小さな部分問題に分解して解くための強力なツールです。
+# 
+# 2. **値関数反復法**と**政策反復法**はベルマン方程式を解く2つの主要な方法であり、どちらも同じ最適解に収束します。政策反復法は一般的に反復回数が少なくて済みますが、各反復での計算コストが高くなります。
+# 
+# 3. **経済パラメータの影響**：αやβのようなパラメータの変化は、最適政策と定常状態に大きな影響を与えます。特に割引因子（β）が大きいほど貯蓄率が高まり、定常状態の資本ストックが増加します。
+# 
+# 4. **数値計算の効率化**：グリッドサイズと収束許容誤差は計算時間と精度のトレードオフに大きく影響します。また、ベクトル化操作を用いた実装は大幅に計算効率を向上させることができます。
+# 
+# このような動学最適化の手法は、経済学だけでなく、機械学習（特に強化学習）、制御理論、財務、生態学モデリングなど幅広い分野で応用されています。
