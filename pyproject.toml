@@ -1,0 +1,25 @@
+[project]
+name = "dynamic-optimizational-model"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "interpolation>=2.2.7",
+    "matplotlib>=3.10.1",
+    "numba>=0.61.2",
+    "numpy>=2.2.5",
+    "pandas>=2.2.3",
+    "pytask>=0.5.2",
+    "pytest>=8.3.5",
+    "quantecon>=0.8.0",
+    "scipy>=1.15.2",
+]
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "mypy>=1.15.0",
+    "pytest-cov>=6.1.1",
+    "ruff>=0.11.8",
+]
