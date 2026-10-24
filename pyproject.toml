@@ -3,7 +3,7 @@ name = "dynamic-optimizational-model"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14.9"
 dependencies = [
     "interpolation>=2.2.7",
     "jupyterlab>=4.4.1",
@@ -15,6 +15,7 @@ dependencies = [
     "pytest>=8.3.5",
     "quantecon>=0.8.0",
     "scipy>=1.15.2",
+    "seaborn>=0.13.2",
 ]
 
 [dependency-groups]
